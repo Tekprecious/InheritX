@@ -32,6 +32,7 @@ fn test_state(secret: Option<&str>) -> std::sync::Arc<inheritx_backend::AppState
         kyc_webhook_secret: secret.map(str::to_string),
         apy_config: inheritx_backend::yield_calculator::ApyConfig::default(),
         plan_cache: inheritx_backend::PlanCache::disabled(),
+        plan_statistics_cache_ttl_secs: 60,
         apy_cache: dashmap::DashMap::new(),
         kyc_tx,
         status_tx: tokio::sync::broadcast::channel(16).0,

@@ -67,6 +67,8 @@ pub struct AppState {
     pub kyc_webhook_secret: Option<String>,
     pub apy_config: yield_calculator::ApyConfig,
     pub plan_cache: PlanCache,
+    /// TTL applied when caching `/api/analytics/plan-statistics` responses.
+    pub plan_statistics_cache_ttl_secs: u64,
     pub apy_cache: dashmap::DashMap<String, u32>,
     pub kyc_tx: tokio::sync::broadcast::Sender<crate::ws::KycUpdateEvent>,
     pub status_tx: tokio::sync::broadcast::Sender<crate::ws::PlanStatusEvent>,
@@ -77,6 +79,19 @@ pub struct AppState {
 pub struct PlanQuery {
     pub owner: Option<String>,
     pub beneficiary: Option<String>,
+}
+
+/// Query filters accepted by `GET /api/analytics/plan-statistics`. All
+/// filters are optional and apply to every metric in the response, including
+/// the locked-value-by-asset breakdown.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlanStatisticsQuery {
+    /// Only include plans created on or after this timestamp.
+    pub start_date: Option<DateTime<Utc>>,
+    /// Only include plans created on or before this timestamp.
+    pub end_date: Option<DateTime<Utc>>,
+    /// Only include plans on this token/asset (matches `plans.token_address`).
+    pub asset_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,6 +303,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // Admin routes requiring JWT authentication
     let admin_routes = Router::new()
         .route("/api/plans/{id}/report", get(get_plan_report))
+        .route("/api/analytics/plan-statistics", get(get_plan_statistics))
         .route_layer(from_fn(jwt_auth_middleware));
 
     // Loan lifecycle: admin JWT or wallet signature.
@@ -1214,6 +1230,201 @@ async fn get_plans(
         total_started.elapsed().as_millis(),
     );
     response
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PlanStatisticsSummaryRow {
+    total_plans: i64,
+    active_plans: i64,
+    expired_plans: i64,
+    triggered_plans: i64,
+    claimed_plans: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PlanStatusCount {
+    pub status: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AssetLockedValue {
+    pub token_address: String,
+    pub total_locked: rust_decimal::Decimal,
+    pub plan_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanStatisticsResponse {
+    pub total_plans: i64,
+    pub active_plans: i64,
+    pub expired_plans: i64,
+    pub triggered_plans: i64,
+    pub claimed_plans: i64,
+    pub by_status: Vec<PlanStatusCount>,
+    pub locked_value_by_asset: Vec<AssetLockedValue>,
+}
+
+/// Appends the WHERE clause shared by every plan-statistics query. Starting
+/// from `1 = 1` lets each metric query unconditionally `AND` its own extra
+/// condition (e.g. `is_active = true` for the locked-value breakdown)
+/// without tracking whether a clause has been opened yet.
+fn append_plan_statistics_filters(
+    builder: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
+    query: &PlanStatisticsQuery,
+) {
+    builder.push(" WHERE 1 = 1");
+
+    if let Some(start) = query.start_date {
+        builder.push(" AND created_at >= ").push_bind(start);
+    }
+
+    if let Some(end) = query.end_date {
+        builder.push(" AND created_at <= ").push_bind(end);
+    }
+
+    if let Some(asset_type) = query
+        .asset_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        builder
+            .push(" AND token_address = ")
+            .push_bind(asset_type.to_string());
+    }
+}
+
+/// Handler: GET /api/analytics/plan-statistics
+/// Aggregate plan metrics for the admin dashboard: plan counts by lifecycle
+/// stage and total locked value per asset. Protected by `jwt_auth_middleware`
+/// (admin JWT only) and cached in Redis (or the in-memory fallback) for
+/// `plan_statistics_cache_ttl_secs` to keep repeated dashboard refreshes off
+/// PostgreSQL.
+async fn get_plan_statistics(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PlanStatisticsQuery>,
+) -> impl IntoResponse {
+    if let (Some(start), Some(end)) = (query.start_date, query.end_date) {
+        if start > end {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "start_date must be before end_date" })),
+            )
+                .into_response();
+        }
+    }
+
+    let cache_key = crate::cache::plan_statistics_cache_key(&query);
+
+    if state.plan_cache.is_enabled() {
+        match state
+            .plan_cache
+            .get_stats::<PlanStatisticsResponse>(&cache_key)
+            .await
+        {
+            Ok(Some(stats)) => {
+                return (StatusCode::OK, Json(serde_json::json!({ "data": stats })))
+                    .into_response();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                error!(error = %err, "Plan statistics cache lookup failed, falling back to PostgreSQL");
+            }
+        }
+    }
+
+    let mut summary_builder = sqlx::QueryBuilder::new(
+        "SELECT \
+            COUNT(*) AS total_plans, \
+            COUNT(*) FILTER (WHERE status = 'ACTIVE' AND inactivity_deadline_at > NOW()) AS active_plans, \
+            COUNT(*) FILTER (WHERE status = 'ACTIVE' AND inactivity_deadline_at <= NOW()) AS expired_plans, \
+            COUNT(*) FILTER (WHERE status IN ('TRIGGERING', 'TRIGGERED', 'TRIGGER_FAILED')) AS triggered_plans, \
+            COUNT(*) FILTER (WHERE status IN ('CLAIMABLE', 'PAID_OUT')) AS claimed_plans \
+         FROM plans",
+    );
+    append_plan_statistics_filters(&mut summary_builder, &query);
+
+    let summary = match summary_builder
+        .build_query_as::<PlanStatisticsSummaryRow>()
+        .fetch_one(&state.db_pool)
+        .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            error!(error = %e, "Failed to query plan statistics summary");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Database query failed: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut status_builder = sqlx::QueryBuilder::new("SELECT status, COUNT(*) AS count FROM plans");
+    append_plan_statistics_filters(&mut status_builder, &query);
+    status_builder.push(" GROUP BY status ORDER BY status");
+
+    let by_status = match status_builder
+        .build_query_as::<PlanStatusCount>()
+        .fetch_all(&state.db_pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!(error = %e, "Failed to query plan status breakdown");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Database query failed: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut locked_builder = sqlx::QueryBuilder::new(
+        "SELECT token_address, COALESCE(SUM(amount), 0::NUMERIC) AS total_locked, COUNT(*) AS plan_count \
+         FROM plans",
+    );
+    append_plan_statistics_filters(&mut locked_builder, &query);
+    locked_builder.push(" AND is_active = true GROUP BY token_address ORDER BY token_address");
+
+    let locked_value_by_asset = match locked_builder
+        .build_query_as::<AssetLockedValue>()
+        .fetch_all(&state.db_pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!(error = %e, "Failed to query locked value by asset");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Database query failed: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    let stats = PlanStatisticsResponse {
+        total_plans: summary.total_plans,
+        active_plans: summary.active_plans,
+        expired_plans: summary.expired_plans,
+        triggered_plans: summary.triggered_plans,
+        claimed_plans: summary.claimed_plans,
+        by_status,
+        locked_value_by_asset,
+    };
+
+    if state.plan_cache.is_enabled() {
+        if let Err(err) = state
+            .plan_cache
+            .set_stats(&cache_key, &stats, state.plan_statistics_cache_ttl_secs)
+            .await
+        {
+            error!(error = %err, "Failed to populate plan statistics cache");
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "data": stats }))).into_response()
 }
 
 /// Verify the ping signature using ed25519.

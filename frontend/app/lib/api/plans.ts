@@ -82,6 +82,14 @@ export interface ClaimPlanRequest {
   two_fa_code: string;
 }
 
+/** Total value locked for a single asset, as returned by the backend's
+ * NUMERIC(78, 0) `plans.amount` column (string-encoded for precision). */
+export interface AssetLockedValue {
+  token_address: string;
+  total_locked: string;
+  plan_count: number;
+}
+
 export interface PlanStatistics {
   total_plans: number;
   active_plans: number;
@@ -92,6 +100,16 @@ export interface PlanStatistics {
     status: string;
     count: number;
   }>;
+  locked_value_by_asset: AssetLockedValue[];
+}
+
+export interface PlanStatisticsFilters {
+  /** ISO 8601 timestamp; only include plans created on or after this date */
+  startDate?: string;
+  /** ISO 8601 timestamp; only include plans created on or before this date */
+  endDate?: string;
+  /** Filter to a single token/asset address */
+  assetType?: string;
 }
 
 export interface LoanLifecycleResponse {
@@ -173,11 +191,20 @@ export class PlansAPI {
   }
 
   /**
-   * Get plan statistics
+   * Get plan statistics for the admin dashboard (active/expired/triggered/
+   * claimed counts and total value locked per asset). Requires an admin JWT.
    */
-  async getPlanStatistics(): Promise<PlanStatistics> {
+  async getPlanStatistics(
+    filters?: PlanStatisticsFilters
+  ): Promise<PlanStatistics> {
+    const params = new URLSearchParams();
+    if (filters?.startDate) params.set("start_date", filters.startDate);
+    if (filters?.endDate) params.set("end_date", filters.endDate);
+    if (filters?.assetType) params.set("asset_type", filters.assetType);
+
+    const queryString = params.toString();
     const response = await apiClient.get<ApiResponse<PlanStatistics>>(
-      "/api/analytics/plan-statistics"
+      `/api/analytics/plan-statistics${queryString ? `?${queryString}` : ""}`
     );
     return response.data!;
   }

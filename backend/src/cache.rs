@@ -1,7 +1,8 @@
-use crate::api::{PlanQuery, PlanResponse};
+use crate::api::{PlanQuery, PlanResponse, PlanStatisticsQuery};
 use std::collections::{HashMap, HashSet};
 
 const CACHE_NAMESPACE: &str = "plans:v1";
+const STATS_CACHE_NAMESPACE: &str = "plan-statistics:v1";
 
 #[derive(Debug)]
 pub enum CacheError {
@@ -239,6 +240,100 @@ impl PlanCache {
             }
         }
     }
+
+    async fn get_raw(&self, cache_key: &str) -> Result<Option<String>, CacheError> {
+        match self {
+            Self::Disabled => Ok(None),
+            #[cfg(feature = "redis-cache")]
+            Self::Redis(redis_cache) => {
+                use redis::AsyncCommands;
+                let mut conn = redis_cache
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(CacheError::Redis)?;
+                let cached: Option<String> =
+                    conn.get(cache_key).await.map_err(CacheError::Redis)?;
+                Ok(cached)
+            }
+            Self::Memory(store) => {
+                let store = store.lock().await;
+                Ok(store.values.get(cache_key).cloned())
+            }
+        }
+    }
+
+    async fn set_raw(
+        &self,
+        cache_key: &str,
+        payload: &str,
+        ttl_secs: u64,
+    ) -> Result<(), CacheError> {
+        match self {
+            Self::Disabled => Ok(()),
+            #[cfg(feature = "redis-cache")]
+            Self::Redis(redis_cache) => {
+                use redis::AsyncCommands;
+                let mut conn = redis_cache
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(CacheError::Redis)?;
+                let _: () = conn
+                    .set_ex(cache_key, payload, ttl_secs.max(1))
+                    .await
+                    .map_err(CacheError::Redis)?;
+                Ok(())
+            }
+            Self::Memory(store) => {
+                let mut store = store.lock().await;
+                store
+                    .values
+                    .insert(cache_key.to_string(), payload.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    /// Fetches and deserializes a generic cached value (used for the
+    /// analytics/plan-statistics endpoint, which isn't shaped like a plan
+    /// list and doesn't need the query-index invalidation `get_plans` does).
+    pub async fn get_stats<T: serde::de::DeserializeOwned>(
+        &self,
+        cache_key: &str,
+    ) -> Result<Option<T>, CacheError> {
+        match self.get_raw(cache_key).await? {
+            Some(payload) => Ok(Some(serde_json::from_str(&payload)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Serializes and stores a generic value with an explicit, per-call TTL
+    /// (statistics use a longer, independently configurable TTL than plans).
+    pub async fn set_stats<T: serde::Serialize>(
+        &self,
+        cache_key: &str,
+        value: &T,
+        ttl_secs: u64,
+    ) -> Result<(), CacheError> {
+        let serialized = serde_json::to_string(value)?;
+        self.set_raw(cache_key, &serialized, ttl_secs).await
+    }
+}
+
+pub(crate) fn plan_statistics_cache_key(query: &PlanStatisticsQuery) -> String {
+    format!(
+        "{STATS_CACHE_NAMESPACE}:query:start={}:end={}:asset={}",
+        query
+            .start_date
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| "all".to_string()),
+        query
+            .end_date
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| "all".to_string()),
+        normalize_optional_filter(query.asset_type.as_deref()),
+    )
 }
 
 pub(crate) fn cache_key(query: &PlanQuery) -> String {
@@ -395,6 +490,50 @@ mod tests {
         assert_eq!(
             cache_key(&query),
             "plans:v1:query:owner=gowner:beneficiary=gbeneficiary"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_cache_round_trips_generic_stats() {
+        use crate::api::PlanStatisticsQuery;
+
+        let cache = PlanCache::memory();
+        let query = PlanStatisticsQuery {
+            start_date: None,
+            end_date: None,
+            asset_type: Some("USDC".to_string()),
+        };
+        let key = plan_statistics_cache_key(&query);
+        let stats = vec![
+            ("ACTIVE".to_string(), 3_i64),
+            ("TRIGGERED".to_string(), 1_i64),
+        ];
+
+        assert!(cache
+            .get_stats::<Vec<(String, i64)>>(&key)
+            .await
+            .unwrap()
+            .is_none());
+
+        cache.set_stats(&key, &stats, 60).await.unwrap();
+
+        let cached: Option<Vec<(String, i64)>> = cache.get_stats(&key).await.unwrap();
+        assert_eq!(cached, Some(stats));
+    }
+
+    #[test]
+    fn plan_statistics_cache_keys_are_normalized_and_stable() {
+        use crate::api::PlanStatisticsQuery;
+
+        let query = PlanStatisticsQuery {
+            start_date: None,
+            end_date: None,
+            asset_type: Some("  USDC ".to_string()),
+        };
+
+        assert_eq!(
+            plan_statistics_cache_key(&query),
+            "plan-statistics:v1:query:start=all:end=all:asset=usdc"
         );
     }
 }

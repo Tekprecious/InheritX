@@ -99,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         kyc_webhook_secret: config.kyc_webhook_secret.clone(),
         apy_config: inheritx_backend::yield_calculator::ApyConfig::from_env(),
         plan_cache: plan_cache.clone(),
+        plan_statistics_cache_ttl_secs: config.plan_statistics_cache_ttl_secs,
         apy_cache: dashmap::DashMap::new(),
         kyc_tx: kyc_tx.clone(),
         status_tx,

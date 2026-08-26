@@ -51,6 +51,7 @@ fn setup_app_with_cache(plan_cache: PlanCache) -> axum::Router {
         kyc_webhook_secret: None,
         apy_config: inheritx_backend::yield_calculator::ApyConfig::default(),
         plan_cache,
+        plan_statistics_cache_ttl_secs: 60,
         apy_cache: dashmap::DashMap::new(),
         stellar_submit: inheritx_backend::stellar_submit::StellarSubmitClient::new(
             "https://horizon-testnet.stellar.org".to_string(),
@@ -522,6 +523,7 @@ async fn test_health_endpoint_without_db_yields_service_unavailable() {
         kyc_webhook_secret: None,
         apy_config: inheritx_backend::yield_calculator::ApyConfig::default(),
         plan_cache: PlanCache::disabled(),
+        plan_statistics_cache_ttl_secs: 60,
         apy_cache: dashmap::DashMap::new(),
         stellar_submit: inheritx_backend::stellar_submit::StellarSubmitClient::new(
             "https://horizon-testnet.stellar.org".to_string(),
@@ -576,6 +578,7 @@ async fn test_get_current_rate_cached() {
         kyc_webhook_secret: None,
         apy_config: inheritx_backend::yield_calculator::ApyConfig::default(),
         plan_cache,
+        plan_statistics_cache_ttl_secs: 60,
         apy_cache: dashmap::DashMap::new(),
         stellar_submit: inheritx_backend::stellar_submit::StellarSubmitClient::new(
             "https://horizon-testnet.stellar.org".to_string(),
@@ -866,4 +869,21 @@ async fn test_trigger_info_is_public() {
 
     assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_plan_statistics_requires_auth() {
+    let app = setup_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(http::Method::GET)
+                .uri("/api/analytics/plan-statistics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

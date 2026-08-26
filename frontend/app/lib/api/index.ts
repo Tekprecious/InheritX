@@ -30,6 +30,8 @@ export type {
   UpdatePlanRequest,
   ClaimPlanRequest,
   PlanStatistics,
+  PlanStatisticsFilters,
+  AssetLockedValue,
 } from "./plans";
 
 import { createLendingAPI } from "./lending";

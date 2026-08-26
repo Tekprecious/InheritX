@@ -8,6 +8,11 @@ pub struct Config {
     pub database_url: String,
     pub redis_url: Option<String>,
     pub plan_cache_ttl_secs: u64,
+    /// TTL for the cached `/api/analytics/plan-statistics` response. Kept
+    /// separate from `plan_cache_ttl_secs` since the statistics query
+    /// aggregates the whole `plans` table and is far more expensive than a
+    /// single plan lookup, so admins tolerate a longer staleness window.
+    pub plan_statistics_cache_ttl_secs: u64,
     /// Shared secret used to verify HMAC-SHA256 signatures on inbound KYC
     /// provider webhooks. When unset, `/api/kyc/webhook` rejects every request.
     pub kyc_webhook_secret: Option<String>,
@@ -36,6 +41,11 @@ impl Config {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(15);
+        let plan_statistics_cache_ttl_secs = std::env::var("PLAN_STATISTICS_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60)
+            .max(1);
         let fiat_daily_limit_default = std::env::var("FIAT_DAILY_LIMIT_DEFAULT")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
@@ -62,6 +72,7 @@ impl Config {
             database_url,
             redis_url,
             plan_cache_ttl_secs,
+            plan_statistics_cache_ttl_secs,
             kyc_webhook_secret,
             stellar_horizon_url,
             anchor_api_url,
