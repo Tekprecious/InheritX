@@ -7,11 +7,20 @@ import {
   allowAllModules,
 } from "@creit.tech/stellar-wallets-kit";
 import { useRouter } from "next/navigation";
+import { STELLAR_NETWORK_PASSPHRASE } from "@/app/lib/stellar/network";
+
+export interface SignTransactionOptions {
+  networkPassphrase?: string;
+  address?: string;
+}
 
 interface WalletContextType {
   connect: (moduleId: string) => Promise<void>;
   disconnect: () => Promise<void>;
-  signTransaction: (xdr: string) => Promise<{ signedTxXdr: string }>;
+  signTransaction: (
+    xdr: string,
+    opts?: SignTransactionOptions
+  ) => Promise<{ signedTxXdr: string }>;
   address: string | null;
   isConnected: boolean;
   isConnecting: boolean;
@@ -21,6 +30,8 @@ interface WalletContextType {
   closeModal: () => void;
   isModalOpen: boolean;
   supportedWallets: { id: string; name: string; icon: string }[];
+  /** Network passphrase this wallet session is configured for (Testnet by default). */
+  networkPassphrase: string;
 }
 
 const WalletContext = createContext<WalletContextType | undefined>(undefined);
@@ -147,13 +158,19 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
   }, [kit]);
 
   const signTransaction = useCallback(
-    async (xdr: string): Promise<{ signedTxXdr: string }> => {
+    async (
+      xdr: string,
+      opts?: SignTransactionOptions
+    ): Promise<{ signedTxXdr: string }> => {
       if (!kit) {
         throw new Error("Wallet not connected. Please connect your wallet first.");
       }
-      return await kit.signTransaction(xdr);
+      return await kit.signTransaction(xdr, {
+        networkPassphrase: opts?.networkPassphrase ?? STELLAR_NETWORK_PASSPHRASE,
+        address: opts?.address ?? address ?? undefined,
+      });
     },
-    [kit]
+    [kit, address]
   );
 
   const openModal = () => setIsModalOpen(true);
@@ -174,6 +191,7 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
         closeModal,
         isModalOpen,
         supportedWallets,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
       }}
     >
       {children}

@@ -1,90 +1,170 @@
-import type { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit";
-import type {
-  CreatePlanRequest,
-  PlanBeneficiaryRequest,
-} from "@/app/lib/api/inheritance";
+import { apiClient, ApiError } from "@/app/lib/api/client";
+import {
+  buildCreateInheritancePlanTransaction,
+  describeContractError,
+  ContractSimulationError,
+} from "@/app/lib/stellar/sorobanClient";
 
-const SECONDS_PER_DAY = 86_400;
-const DEFAULT_YIELD_RATE_BPS = 500;
+export { ContractSimulationError };
+import { toAtomicAmount, type ContractBeneficiaryInput, type DistributionMethod } from "@/app/lib/stellar/contractParams";
+import { stellarExpertTxUrl } from "@/app/lib/stellar/network";
 
-export interface CreatePlanContractInput {
+export type { ContractBeneficiaryInput, DistributionMethod };
+
+export interface CreateInheritancePlanContractInput {
   owner: string;
   token: string;
-  amount: number;
-  beneficiaries: PlanBeneficiaryRequest[];
-  gracePeriodDays: number;
-  earnYield: boolean;
-  timelockDays: number;
+  planName: string;
+  description: string;
+  /** Deposit amount as a plain decimal string, e.g. "150.5". */
+  amount: string;
+  distributionMethod: DistributionMethod;
+  beneficiaries: ContractBeneficiaryInput[];
+  isLendable: boolean;
 }
 
-export interface CreatePlanContractResult {
-  request: CreatePlanRequest;
+/** Wallet-provided signer. Matches `WalletContext.signTransaction`. */
+export type TransactionSigner = (
+  xdr: string,
+  opts?: { networkPassphrase?: string; address?: string }
+) => Promise<{ signedTxXdr: string }>;
+
+export type CreatePlanStage =
+  | "building"
+  | "awaiting-signature"
+  | "submitting"
+  | "confirmed";
+
+export interface CreatePlanProgress {
+  stage: CreatePlanStage;
+}
+
+export interface SubmitTransactionResult {
+  hash: string;
+  successful: boolean;
+  raw: Record<string, unknown>;
+}
+
+export class TransactionSubmissionError extends Error {
+  constructor(
+    message: string,
+    public readonly raw?: unknown
+  ) {
+    super(message);
+    this.name = "TransactionSubmissionError";
+  }
+}
+
+export interface InvokeCreateInheritancePlanResult {
   unsignedTransactionXdr: string;
-  signedTransactionXdr?: string;
+  signedTransactionXdr: string;
+  submission: SubmitTransactionResult;
+  explorerUrl: string;
 }
 
-export function buildCreatePlanRequest(input: CreatePlanContractInput): CreatePlanRequest {
-  const gracePeriod = input.gracePeriodDays * SECONDS_PER_DAY;
-
-  return {
+/** Builds the ready-to-sign XDR for `create_inheritance_plan` from panel input. */
+export async function buildCreateInheritancePlanXdr(
+  input: CreateInheritancePlanContractInput
+): Promise<{ unsignedTransactionXdr: string; networkPassphrase: string }> {
+  return buildCreateInheritancePlanTransaction({
     owner: input.owner,
     token: input.token,
-    amount: input.amount,
+    planName: input.planName,
+    description: input.description,
+    totalAmountAtomic: toAtomicAmount(input.amount),
+    distributionMethod: input.distributionMethod,
     beneficiaries: input.beneficiaries,
-    last_ping: Math.floor(Date.now() / 1000),
-    grace_period: gracePeriod,
-    earn_yield: input.earnYield,
-    yield_rate_bps: input.earnYield ? DEFAULT_YIELD_RATE_BPS : 0,
-    is_active: true,
-  };
+    isLendable: input.isLendable,
+  });
 }
 
-function encodeBase64(value: string): string {
-  if (typeof window !== "undefined" && typeof window.btoa === "function") {
-    return window.btoa(value);
+/** Submits an already-signed transaction envelope to the backend's Horizon relay. */
+export async function submitSignedTransaction(
+  signedTransactionXdr: string
+): Promise<SubmitTransactionResult> {
+  try {
+    const response = await apiClient.post<Record<string, unknown>>(
+      "/api/transactions/submit",
+      { xdr: signedTransactionXdr }
+    );
+
+    const hash = typeof response.hash === "string" ? response.hash : "";
+    const successful = response.successful !== false;
+
+    if (!hash) {
+      throw new TransactionSubmissionError(
+        "The network accepted the request but returned no transaction hash.",
+        response
+      );
+    }
+
+    return { hash, successful, raw: response };
+  } catch (error) {
+    if (error instanceof ApiError) {
+      const extras = (error.response as { extras?: { result_codes?: unknown } } | undefined)
+        ?.extras;
+      const detail = extras?.result_codes
+        ? JSON.stringify(extras.result_codes)
+        : error.message;
+      throw new TransactionSubmissionError(
+        `Transaction was rejected by the network: ${detail}`,
+        error.response
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * Full on-chain plan creation flow: build + simulate the transaction, ask the
+ * connected wallet to sign it, then relay the signed envelope through the
+ * backend's `/api/transactions/submit` endpoint. Reports progress via
+ * `onProgress` so the UI can show a step-by-step status.
+ */
+export async function invokeCreateInheritancePlan(options: {
+  contractInput: CreateInheritancePlanContractInput;
+  walletAddress: string;
+  signTransaction: TransactionSigner;
+  onProgress?: (progress: CreatePlanProgress) => void;
+}): Promise<InvokeCreateInheritancePlanResult> {
+  const { contractInput, walletAddress, signTransaction, onProgress } = options;
+
+  onProgress?.({ stage: "building" });
+  const { unsignedTransactionXdr, networkPassphrase } = await buildCreateInheritancePlanXdr(
+    contractInput
+  );
+
+  onProgress?.({ stage: "awaiting-signature" });
+  let signed;
+  try {
+    signed = await signTransaction(unsignedTransactionXdr, {
+      networkPassphrase,
+      address: walletAddress,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ContractSimulationError(
+      message.toLowerCase().includes("declin") || message.toLowerCase().includes("reject")
+        ? "Signature request was declined in the wallet."
+        : describeContractError(message),
+      error
+    );
   }
 
-  return Buffer.from(value, "utf-8").toString("base64");
-}
+  onProgress?.({ stage: "submitting" });
+  const submission = await submitSignedTransaction(signed.signedTxXdr);
 
-function buildUnsignedCreatePlanXdr(input: CreatePlanContractInput): string {
-  const payload = {
-    contract: process.env.NEXT_PUBLIC_INHERITANCE_CONTRACT_ID ?? "inheritance-contract",
-    method: "create_plan",
-    owner: input.owner,
-    token: input.token,
-    amount: input.amount,
-    beneficiaries: input.beneficiaries,
-    grace_period: input.gracePeriodDays * SECONDS_PER_DAY,
-    earn_yield: input.earnYield,
-    yield_rate_bps: input.earnYield ? DEFAULT_YIELD_RATE_BPS : 0,
-    timelock_duration: input.timelockDays * SECONDS_PER_DAY,
-  };
-
-  return `unsigned-xdr::create_plan::${encodeBase64(JSON.stringify(payload))}`;
-}
-
-export async function invokeCreatePlan(input: {
-  contractInput: CreatePlanContractInput;
-  kit: StellarWalletsKit | null;
-  selectedWalletId: string | null;
-}): Promise<CreatePlanContractResult> {
-  const request = buildCreatePlanRequest(input.contractInput);
-  const unsignedTransactionXdr = buildUnsignedCreatePlanXdr(input.contractInput);
-
-  if (!input.kit || !input.selectedWalletId) {
-    return { request, unsignedTransactionXdr };
-  }
-
-  const signed = await input.kit.signTransaction(unsignedTransactionXdr);
+  onProgress?.({ stage: "confirmed" });
   return {
-    request,
     unsignedTransactionXdr,
     signedTransactionXdr: signed.signedTxXdr,
+    submission,
+    explorerUrl: stellarExpertTxUrl(submission.hash),
   };
 }
 
 export const inheritanceContractService = {
-  buildCreatePlanRequest,
-  invokeCreatePlan,
+  buildCreateInheritancePlanXdr,
+  submitSignedTransaction,
+  invokeCreateInheritancePlan,
 };

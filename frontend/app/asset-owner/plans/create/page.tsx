@@ -22,7 +22,6 @@ import {
   type DraftBeneficiary,
   type InheritancePlanDraft,
 } from "@/app/lib/validation/inheritancePlan";
-import { invokeCreatePlan } from "@/app/services/inheritanceContractService";
 import { KYCRequiredGuard } from "@/components/kyc/KYCRequiredGuard";
 import { CrossChainDepositSection } from "@/components/plans/CrossChainDepositSection";
 import { CrossChainWalletProvider } from "@/context/CrossChainWalletContext";

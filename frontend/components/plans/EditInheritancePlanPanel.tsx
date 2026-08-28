@@ -58,6 +58,8 @@ function seedBeneficiaries(plan: Plan): BeneficiaryDraft[] {
         fiatCurrency: parsed?.currency ?? "USD",
         fiatDailyLimit:
           parsed?.daily_limit ?? (b.fiat_daily_limit ? String(b.fiat_daily_limit) : ""),
+        email: b.email ?? "",
+        claimCode: b.claim_code ?? "",
       };
     });
   }

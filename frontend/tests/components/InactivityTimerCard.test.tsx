@@ -43,6 +43,7 @@ describe("InactivityTimerCard", () => {
       closeModal: vi.fn(),
       isModalOpen: false,
       supportedWallets: [],
+      networkPassphrase: "Test SDF Network ; September 2015",
     });
 
     render(<InactivityTimerCard planId={mockPlanId} />);
@@ -81,6 +82,7 @@ describe("InactivityTimerCard", () => {
       closeModal: vi.fn(),
       isModalOpen: false,
       supportedWallets: [],
+      networkPassphrase: "Test SDF Network ; September 2015",
     });
 
     render(<InactivityTimerCard planId={mockPlanId} />);
@@ -118,6 +120,7 @@ describe("InactivityTimerCard", () => {
       closeModal: vi.fn(),
       isModalOpen: false,
       supportedWallets: [],
+      networkPassphrase: "Test SDF Network ; September 2015",
     });
 
     render(<InactivityTimerCard planId={mockPlanId} />);
@@ -153,6 +156,7 @@ describe("InactivityTimerCard", () => {
       closeModal: vi.fn(),
       isModalOpen: false,
       supportedWallets: [],
+      networkPassphrase: "Test SDF Network ; September 2015",
     });
 
     render(<InactivityTimerCard planId={mockPlanId} />);
@@ -211,6 +215,7 @@ describe("InactivityTimerCard", () => {
       closeModal: vi.fn(),
       isModalOpen: false,
       supportedWallets: [],
+      networkPassphrase: "Test SDF Network ; September 2015",
     });
 
     render(<InactivityTimerCard planId={mockPlanId} />);
@@ -288,6 +293,7 @@ describe("InactivityTimerCard", () => {
       closeModal: vi.fn(),
       isModalOpen: false,
       supportedWallets: [],
+      networkPassphrase: "Test SDF Network ; September 2015",
     });
 
     render(
@@ -350,6 +356,7 @@ describe("InactivityTimerCard", () => {
       closeModal: vi.fn(),
       isModalOpen: false,
       supportedWallets: [],
+      networkPassphrase: "Test SDF Network ; September 2015",
     });
 
     render(

@@ -1,66 +1,112 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+
+const getAccountMock = vi.fn();
+const prepareTransactionMock = vi.fn();
+
+vi.mock("@stellar/stellar-sdk", async () => {
+  const actual = await vi.importActual<typeof import("@stellar/stellar-sdk")>(
+    "@stellar/stellar-sdk"
+  );
+  return {
+    ...actual,
+    rpc: {
+      ...actual.rpc,
+      Server: vi.fn().mockImplementation(() => ({
+        getAccount: getAccountMock,
+        prepareTransaction: prepareTransactionMock,
+      })),
+    },
+  };
+});
+
+vi.mock("@/app/lib/api/client", async () => {
+  const actual = await vi.importActual<typeof import("@/app/lib/api/client")>(
+    "@/app/lib/api/client"
+  );
+  return {
+    ...actual,
+    apiClient: {
+      post: vi.fn(),
+    },
+  };
+});
+
+import { Account } from "@stellar/stellar-sdk";
+import { apiClient } from "@/app/lib/api/client";
 import {
-  buildCreatePlanRequest,
-  invokeCreatePlan,
-  type CreatePlanContractInput,
+  invokeCreateInheritancePlan,
+  submitSignedTransaction,
+  TransactionSubmissionError,
+  type CreateInheritancePlanContractInput,
 } from "@/app/services/inheritanceContractService";
 
-const baseInput: CreatePlanContractInput = {
+const baseInput: CreateInheritancePlanContractInput = {
   owner: "GAIE4IHLNGMX2ZGURV2DZEAFFU6P3X7UPFNRSGRZI2QUD2IU4GVOMKIV",
-  token: "XLM",
-  amount: 250,
-  gracePeriodDays: 90,
-  earnYield: true,
-  timelockDays: 5,
+  token: "GDP2PVYRRAB35TQMJ4DPJOV5BBBM6PJUHWKMSTF6YYXUDXUT7BCLCIFE",
+  planName: "Family Trust",
+  description: "A test plan",
+  amount: "100",
+  distributionMethod: "LumpSum",
+  isLendable: false,
   beneficiaries: [
     {
-      address: "GCDFLQR2SGPDRQ473YUJ3Z5Z64BAJOH7EFFF4DC6ZEABSUWNLAR7Q7KJ",
-      name: "Alice",
-      allocation_bps: 7000,
-      fiat_anchor_info: "",
-    },
-    {
-      address: "GDP2PVYRRAB35TQMJ4DPJOV5BBBM6PJUHWKMSTF6YYXUDXUT7BCLCIFE",
-      name: "Bob",
-      allocation_bps: 3000,
-      fiat_anchor_info: "",
+      fullName: "Alice",
+      email: "alice@example.com",
+      claimCode: 123456,
+      bankAccount: "0123456789",
+      allocationBp: 10000,
+      priority: 1,
     },
   ],
 };
 
 describe("inheritanceContractService", () => {
-  it("builds the backend create plan request from contract input", () => {
-    const request = buildCreatePlanRequest(baseInput);
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.NEXT_PUBLIC_INHERITANCE_CONTRACT_ID =
+      "CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526";
 
-    expect(request.owner).toBe(baseInput.owner);
-    expect(request.token).toBe("XLM");
-    expect(request.amount).toBe(250);
-    expect(request.grace_period).toBe(90 * 86_400);
-    expect(request.earn_yield).toBe(true);
-    expect(request.yield_rate_bps).toBe(500);
-    expect(request.beneficiaries).toHaveLength(2);
+    getAccountMock.mockResolvedValue(
+      new Account(baseInput.owner, "123")
+    );
+    prepareTransactionMock.mockImplementation(async (tx: { toXDR: () => string }) => tx);
   });
 
-  it("disables yield rate when Earn Yield is off", () => {
-    const request = buildCreatePlanRequest({ ...baseInput, earnYield: false });
-
-    expect(request.earn_yield).toBe(false);
-    expect(request.yield_rate_bps).toBe(0);
-  });
-
-  it("signs the create_plan transaction when a wallet kit is available", async () => {
+  it("builds, signs and submits the create_inheritance_plan transaction", async () => {
     const signTransaction = vi.fn().mockResolvedValue({ signedTxXdr: "signed-xdr" });
-
-    const result = await invokeCreatePlan({
-      contractInput: baseInput,
-      selectedWalletId: "freighter",
-      kit: { signTransaction } as never,
+    vi.mocked(apiClient.post).mockResolvedValue({
+      hash: "abc123",
+      successful: true,
     });
 
+    const progress: string[] = [];
+
+    const result = await invokeCreateInheritancePlan({
+      contractInput: baseInput,
+      walletAddress: baseInput.owner,
+      signTransaction,
+      onProgress: (p) => progress.push(p.stage),
+    });
+
+    expect(getAccountMock).toHaveBeenCalledWith(baseInput.owner);
+    expect(prepareTransactionMock).toHaveBeenCalled();
     expect(signTransaction).toHaveBeenCalledWith(
-      expect.stringContaining("unsigned-xdr::create_plan::")
+      expect.any(String),
+      expect.objectContaining({ address: baseInput.owner })
     );
-    expect(result.signedTransactionXdr).toBe("signed-xdr");
-    expect(result.request.grace_period).toBe(90 * 86_400);
+    expect(apiClient.post).toHaveBeenCalledWith("/api/transactions/submit", {
+      xdr: "signed-xdr",
+    });
+    expect(result.submission.hash).toBe("abc123");
+    expect(result.explorerUrl).toContain("abc123");
+    expect(progress).toEqual(["building", "awaiting-signature", "submitting", "confirmed"]);
+  });
+
+  it("throws TransactionSubmissionError when the network returns no hash", async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({ successful: true });
+
+    await expect(submitSignedTransaction("signed-xdr")).rejects.toThrow(
+      TransactionSubmissionError
+    );
   });
 });

@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import { ArrowLeftRight, Trash2 } from "lucide-react";
 import { isValidStellarAccount } from "@/app/lib/validation/inheritancePlan";
 import type { PlanBeneficiaryRequest } from "@/app/lib/api/inheritance";
+import type { ContractBeneficiaryInput } from "@/app/lib/stellar/contractParams";
 
 export interface BeneficiaryDraft {
   address: string;
@@ -16,6 +17,21 @@ export interface BeneficiaryDraft {
   fiatCurrency: string;
   /** Optional daily fiat payout limit, entered as a plain decimal string. */
   fiatDailyLimit: string;
+  /** Beneficiary email — required on-chain (must be unique per plan). */
+  email: string;
+  /** 6-digit numeric claim code (0-999999) the beneficiary will later use to claim. */
+  claimCode: string;
+}
+
+/** Generates a random 6-digit claim code, zero-padded, matching the contract's 0-999999 range. */
+export function generateClaimCode(): string {
+  const bytes = new Uint32Array(1);
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    bytes[0] = Math.floor(Math.random() * 1_000_000);
+  }
+  return String(bytes[0] % 1_000_000).padStart(6, "0");
 }
 
 export const DEFAULT_BENEFICIARY_DRAFT: BeneficiaryDraft = {
@@ -27,6 +43,8 @@ export const DEFAULT_BENEFICIARY_DRAFT: BeneficiaryDraft = {
   fiatAccount: "",
   fiatCurrency: "USD",
   fiatDailyLimit: "",
+  email: "",
+  claimCode: "",
 };
 
 export function totalAllocationBps(beneficiaries: BeneficiaryDraft[]): number {
@@ -50,6 +68,15 @@ interface BeneficiaryValidation {
   totalError?: string;
 }
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Base validation shared by the create and edit panels: wallet address,
+ * name and allocation only. This intentionally does NOT require email/claim
+ * code/settlement reference — those are only meaningful for the on-chain
+ * `create_inheritance_plan` call (see `validateContractBeneficiaryDrafts`),
+ * not for editing an existing off-chain plan record.
+ */
 export function validateBeneficiaryDrafts(
   beneficiaries: BeneficiaryDraft[]
 ): BeneficiaryValidation {
@@ -96,6 +123,46 @@ export function validateBeneficiaryDrafts(
   return { rowErrors, totalError };
 }
 
+/**
+ * Additional validation required before beneficiaries can be submitted to
+ * `create_inheritance_plan` on-chain: a unique email per beneficiary, a
+ * 6-digit claim code, and a non-empty settlement reference (the contract
+ * rejects an empty `bank_account`). Layered on top of, not instead of,
+ * `validateBeneficiaryDrafts`.
+ */
+export function validateContractBeneficiaryDrafts(
+  beneficiaries: BeneficiaryDraft[]
+): BeneficiaryValidation {
+  const rowErrors: Record<number, string> = {};
+  const seenEmails = new Set<string>();
+
+  beneficiaries.forEach((b, index) => {
+    const email = b.email.trim().toLowerCase();
+
+    if (!EMAIL_PATTERN.test(email)) {
+      rowErrors[index] = "Enter a valid email address.";
+      return;
+    }
+    if (seenEmails.has(email)) {
+      rowErrors[index] = "This email is already used by another beneficiary.";
+      return;
+    }
+    seenEmails.add(email);
+
+    if (!/^\d{1,6}$/.test(b.claimCode.trim())) {
+      rowErrors[index] = "Claim code must be a 6-digit number.";
+      return;
+    }
+
+    if (!b.fiatAccount.trim()) {
+      rowErrors[index] = "Account / settlement reference is required.";
+      return;
+    }
+  });
+
+  return { rowErrors };
+}
+
 /** Builds the fiat_anchor_info payload the backend parses on payout. Empty string means crypto payout. */
 export function buildFiatAnchorInfo(b: BeneficiaryDraft): string {
   if (!b.isFiat) return "";
@@ -106,6 +173,25 @@ export function buildFiatAnchorInfo(b: BeneficiaryDraft): string {
     account: b.fiatAccount.trim(),
     ...(b.fiatDailyLimit.trim() ? { daily_limit: b.fiatDailyLimit.trim() } : {}),
   });
+}
+
+/**
+ * Converts a draft into the on-chain beneficiary tuple input. `priority` is
+ * assigned by the caller (1-indexed row order) since the contract requires
+ * unique, non-zero priorities and the UI doesn't expose manual reordering.
+ */
+export function beneficiaryDraftToContractInput(
+  b: BeneficiaryDraft,
+  priority: number
+): ContractBeneficiaryInput {
+  return {
+    fullName: b.name.trim(),
+    email: b.email.trim().toLowerCase(),
+    claimCode: Number.parseInt(b.claimCode.trim(), 10),
+    bankAccount: b.fiatAccount.trim(),
+    allocationBp: b.allocationBps,
+    priority,
+  };
 }
 
 export function beneficiaryDraftToRequest(b: BeneficiaryDraft): PlanBeneficiaryRequest {
@@ -222,8 +308,58 @@ export function BeneficiaryAllocationRow({
         </button>
       </div>
 
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1 border-t border-[#2A3338]/60">
+        <div className="flex flex-col gap-1 pt-2">
+          <label className="text-[10px] text-[#92A5A8] uppercase tracking-wider">
+            Email
+          </label>
+          <input
+            type="email"
+            value={beneficiary.email}
+            onChange={(e) => onChange(index, "email", e.target.value)}
+            placeholder="alice@example.com"
+            className="bg-[#0A0F11] border border-[#2A3338] rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-[#4A5568] focus:outline-none focus:border-[#33C5E0] transition-colors"
+          />
+        </div>
+        <div className="flex flex-col gap-1 pt-2">
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] text-[#92A5A8] uppercase tracking-wider">
+              Claim Code
+            </label>
+            <button
+              type="button"
+              onClick={() => onChange(index, "claimCode", generateClaimCode())}
+              className="text-[10px] text-[#33C5E0] hover:text-cyan-300 transition-colors"
+            >
+              Generate
+            </button>
+          </div>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={6}
+            value={beneficiary.claimCode}
+            onChange={(e) => onChange(index, "claimCode", e.target.value.replace(/\D/g, ""))}
+            placeholder="000000"
+            className="bg-[#0A0F11] border border-[#2A3338] rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-[#4A5568] focus:outline-none focus:border-[#33C5E0] transition-colors font-mono"
+          />
+        </div>
+        <div className="flex flex-col gap-1 pt-2">
+          <label className="text-[10px] text-[#92A5A8] uppercase tracking-wider">
+            Account / Settlement Reference
+          </label>
+          <input
+            type="text"
+            value={beneficiary.fiatAccount}
+            onChange={(e) => onChange(index, "fiatAccount", e.target.value)}
+            placeholder="0123456789"
+            className="bg-[#0A0F11] border border-[#2A3338] rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-[#4A5568] focus:outline-none focus:border-[#33C5E0] transition-colors"
+          />
+        </div>
+      </div>
+
       {beneficiary.isFiat && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1 border-t border-[#2A3338]/60">
+        <div className="grid grid-cols-2 sm:grid-cols-2 gap-3 pt-1 border-t border-[#2A3338]/60">
           <div className="flex flex-col gap-1 pt-2">
             <label className="text-[10px] text-[#92A5A8] uppercase tracking-wider">
               Bank Name
@@ -233,18 +369,6 @@ export function BeneficiaryAllocationRow({
               value={beneficiary.fiatBank}
               onChange={(e) => onChange(index, "fiatBank", e.target.value)}
               placeholder="First Bank"
-              className="bg-[#0A0F11] border border-[#2A3338] rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-[#4A5568] focus:outline-none focus:border-[#33C5E0] transition-colors"
-            />
-          </div>
-          <div className="flex flex-col gap-1 pt-2">
-            <label className="text-[10px] text-[#92A5A8] uppercase tracking-wider">
-              Account Number
-            </label>
-            <input
-              type="text"
-              value={beneficiary.fiatAccount}
-              onChange={(e) => onChange(index, "fiatAccount", e.target.value)}
-              placeholder="0123456789"
               className="bg-[#0A0F11] border border-[#2A3338] rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-[#4A5568] focus:outline-none focus:border-[#33C5E0] transition-colors"
             />
           </div>
