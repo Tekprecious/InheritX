@@ -1,8 +1,8 @@
 #![no_std]
 use access_control::{self, Role};
 use soroban_sdk::{
-    contract, contractimpl, contracttype, log, symbol_short, token, vec, Address, BytesN, Env,
-    IntoVal, InvokeError, Val, Vec,
+    contract, contractimpl, contracttype, log, symbol_short, token, vec, Address, Bytes, BytesN,
+    Env, IntoVal, InvokeError, String, Val, Vec,
 };
 
 mod reserves;
@@ -127,6 +127,12 @@ pub struct NftLoanMetadata {
     pub collateral_amount: u64,
     pub collateral_token: Address,
     pub due_date: u64,
+    /// LTV ratio in basis points (e.g. 5000 = 50% loan-to-value).
+    pub ltv_ratio_bps: u32,
+    /// Inheritance plan the loan NFT is bound to (0 = no plan).
+    pub plan_id: u64,
+    /// On-chain URI JSON bound to the token, returned by `get_token_uri`.
+    pub uri: String,
 }
 
 #[contracttype]
@@ -157,6 +163,7 @@ pub trait LoanNFTInterface {
     fn burn(env: Env, loan_id: u64);
     fn get_metadata(env: Env, loan_id: u64) -> Option<NftLoanMetadata>;
     fn owner_of(env: Env, loan_id: u64) -> Option<Address>;
+    fn get_token_uri(env: Env, token_id: u32) -> String;
 }
 
 #[soroban_sdk::contractclient(name = "FlashLoanReceiverClient")]
@@ -1000,6 +1007,57 @@ impl LendingContract {
         current
     }
 
+    fn calc_ltv_ratio_bps(principal: u64, collateral_amount: u64) -> u32 {
+        if collateral_amount == 0 {
+            return 0;
+        }
+        let ltv = ((principal as u128) * 10_000) / (collateral_amount as u128);
+        ltv.min(u32::MAX as u128) as u32
+    }
+
+    fn build_loan_nft_uri(
+        env: &Env,
+        loan_id: u64,
+        principal: u64,
+        collateral_amount: u64,
+        ltv_ratio_bps: u32,
+        due_date: u64,
+    ) -> String {
+        let mut data = Bytes::new(env);
+        data.extend_from_slice(b"{\"name\":\"InheritX Loan NFT #");
+        Self::append_u64_to_bytes(&mut data, loan_id);
+        data.extend_from_slice(b"\",\"loan_id\":");
+        Self::append_u64_to_bytes(&mut data, loan_id);
+        data.extend_from_slice(b",\"principal\":");
+        Self::append_u64_to_bytes(&mut data, principal);
+        data.extend_from_slice(b",\"collateral_amount\":");
+        Self::append_u64_to_bytes(&mut data, collateral_amount);
+        data.extend_from_slice(b",\"ltv_ratio_bps\":");
+        Self::append_u64_to_bytes(&mut data, ltv_ratio_bps as u64);
+        data.extend_from_slice(b",\"plan_id\":0");
+        data.extend_from_slice(b",\"due_date\":");
+        Self::append_u64_to_bytes(&mut data, due_date);
+        data.extend_from_slice(b"}");
+        let bytes = data.to_alloc_vec();
+        String::from_bytes(env, &bytes)
+    }
+
+    fn append_u64_to_bytes(data: &mut Bytes, n: u64) {
+        if n == 0 {
+            data.push_back(b'0');
+            return;
+        }
+        let mut buf = [0u8; 20];
+        let mut idx = 20;
+        let mut remaining = n;
+        while remaining > 0 {
+            idx -= 1;
+            buf[idx] = b'0' + (remaining % 10) as u8;
+            remaining /= 10;
+        }
+        data.extend_from_slice(&buf[idx..]);
+    }
+
     fn get_collateral_ratio(env: &Env) -> u32 {
         env.storage()
             .instance()
@@ -1516,6 +1574,15 @@ impl LendingContract {
 
         // Mint NFT if token is set
         if let Some(nft_token) = Self::get_nft_token(&env) {
+            let ltv_ratio_bps = Self::calc_ltv_ratio_bps(amount, collateral_amount);
+            let uri = Self::build_loan_nft_uri(
+                &env,
+                loan_id,
+                amount,
+                collateral_amount,
+                ltv_ratio_bps,
+                due_date,
+            );
             let nft_client = LoanNFTClient::new(&env, &nft_token);
             nft_client.mint(
                 &borrower,
@@ -1526,6 +1593,9 @@ impl LendingContract {
                     collateral_amount,
                     collateral_token: collateral_token.clone(),
                     due_date,
+                    ltv_ratio_bps,
+                    plan_id: 0,
+                    uri,
                 },
             );
         }
@@ -2755,6 +2825,16 @@ impl LendingContract {
 
         // Mint new NFT if token is set
         if let Some(nft_token) = Self::get_nft_token(&env) {
+            let ltv_ratio_bps =
+                Self::calc_ltv_ratio_bps(new_loan.principal, new_loan.collateral_amount);
+            let uri = Self::build_loan_nft_uri(
+                &env,
+                new_loan_id,
+                new_loan.principal,
+                new_loan.collateral_amount,
+                ltv_ratio_bps,
+                new_loan.due_date,
+            );
             let nft_client = LoanNFTClient::new(&env, &nft_token);
             nft_client.mint(
                 &borrower,
@@ -2765,6 +2845,9 @@ impl LendingContract {
                     collateral_amount: new_loan.collateral_amount,
                     collateral_token: new_loan.collateral_token.clone(),
                     due_date: new_loan.due_date,
+                    ltv_ratio_bps,
+                    plan_id: 0,
+                    uri,
                 },
             );
         }
@@ -2961,6 +3044,16 @@ impl LendingContract {
 
         // Mint new NFT
         if let Some(nft_token) = Self::get_nft_token(&env) {
+            let ltv_ratio_bps =
+                Self::calc_ltv_ratio_bps(new_loan.principal, new_loan.collateral_amount);
+            let uri = Self::build_loan_nft_uri(
+                &env,
+                new_loan_id,
+                new_loan.principal,
+                new_loan.collateral_amount,
+                ltv_ratio_bps,
+                new_loan.due_date,
+            );
             let nft_client = LoanNFTClient::new(&env, &nft_token);
             nft_client.mint(
                 &borrower,
@@ -2971,6 +3064,9 @@ impl LendingContract {
                     collateral_amount: new_loan.collateral_amount,
                     collateral_token: new_loan.collateral_token.clone(),
                     due_date: new_loan.due_date,
+                    ltv_ratio_bps,
+                    plan_id: 0,
+                    uri,
                 },
             );
         }
@@ -3112,6 +3208,16 @@ impl LendingContract {
 
             // Mint NFT for each new loan
             if let Some(nft_token) = Self::get_nft_token(&env) {
+                let ltv_ratio_bps =
+                    Self::calc_ltv_ratio_bps(new_loan.principal, new_loan.collateral_amount);
+                let uri = Self::build_loan_nft_uri(
+                    &env,
+                    new_loan_id,
+                    new_loan.principal,
+                    new_loan.collateral_amount,
+                    ltv_ratio_bps,
+                    new_loan.due_date,
+                );
                 let nft_client = LoanNFTClient::new(&env, &nft_token);
                 nft_client.mint(
                     &borrower,
@@ -3122,6 +3228,9 @@ impl LendingContract {
                         collateral_amount: new_loan.collateral_amount,
                         collateral_token: new_loan.collateral_token.clone(),
                         due_date: new_loan.due_date,
+                        ltv_ratio_bps,
+                        plan_id: 0,
+                        uri,
                     },
                 );
             }
