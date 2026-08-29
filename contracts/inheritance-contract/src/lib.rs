@@ -31,6 +31,8 @@ const MAX_YIELD_BATCH: u32 = 25;
 
 /// Emergency cooldown period in seconds (24 hours)
 const EMERGENCY_COOLDOWN_PERIOD: u64 = 86400;
+const MIN_GRACE_PERIOD_SECONDS: u64 = 604_800;
+const MAX_GRACE_PERIOD_SECONDS: u64 = 5 * 365 * 24 * 60 * 60;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -472,6 +474,13 @@ pub struct VaultWithdrawEvent {
 pub struct VaultLendableChangedEvent {
     pub plan_id: u64,
     pub is_lendable: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GracePeriodUpdatedEvent {
+    pub plan_id: u64,
+    pub new_grace_period: u64,
 }
 
 #[contracttype]
@@ -2075,6 +2084,35 @@ impl InheritanceContract {
             },
         );
         log!(&env, "Vault {} lendable set to {}", plan_id, is_lendable);
+        Ok(())
+    }
+
+    /// Update the inactivity grace period of an existing plan.
+    pub fn update_grace_period(
+        env: Env,
+        plan_id: u64,
+        new_grace_period: u64,
+    ) -> Result<(), InheritanceError> {
+        let mut plan = Self::get_plan(&env, plan_id).ok_or(InheritanceError::PlanNotFound)?;
+        plan.owner.require_auth();
+        if !(MIN_GRACE_PERIOD_SECONDS..=MAX_GRACE_PERIOD_SECONDS).contains(&new_grace_period) {
+            return Err(InheritanceError::InvalidBeneficiaryData);
+        }
+        plan.grace_period = new_grace_period;
+        Self::store_plan(&env, plan_id, &plan);
+        env.events().publish(
+            (symbol_short!("PLAN"), symbol_short!("GRACE")),
+            GracePeriodUpdatedEvent {
+                plan_id,
+                new_grace_period,
+            },
+        );
+        log!(
+            &env,
+            "Plan {} grace period set to {} seconds",
+            plan_id,
+            new_grace_period
+        );
         Ok(())
     }
 
