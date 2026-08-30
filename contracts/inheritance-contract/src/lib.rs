@@ -9,6 +9,7 @@ mod disputes;
 use disputes::{DisputeRecord, DisputeStatus};
 
 mod yield_math;
+mod reentrancy;
 
 /// Current contract version - bump this on each upgrade
 const CONTRACT_VERSION: u32 = 1;
@@ -139,6 +140,7 @@ pub enum InheritanceError {
     WillAlreadyLinked = 48,
     WillAlreadyFinalized = 49,
     WillVersionNotFound = 50,
+    ReentrantCall = 51,
 }
 
 #[contracttype]
@@ -197,6 +199,7 @@ pub enum DataKey {
     // Yield harvesting
     Yr,      // Vec<Address> of accounts allowed to trigger harvests
     Ys(u64), // plan_id -> PlanYieldState
+    ReentrancyGuard,
 }
 
 #[contracttype]
@@ -2510,7 +2513,7 @@ impl InheritanceContract {
         // Require claimer authorization
         claimer.require_auth();
         Self::check_not_paused(&env);
-        Self::enter_guard(&env);
+        let _guard = access_control::ReentrancyGuard::lock_or_panic(&env);
 
         // Check KYC approval - only approved users can claim plans
         Self::check_kyc_approved(&env, &claimer)?;

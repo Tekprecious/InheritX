@@ -2255,7 +2255,7 @@ impl InheritanceContract {
         // Require claimer authorization
         claimer.require_auth();
         Self::check_not_paused(&env);
-        Self::enter_guard(&env);
+        let _guard = access_control::ReentrancyGuard::lock_or_panic(&env);
 
         // Check KYC approval - only approved users can claim plans
         Self::check_kyc_approved(&env, &claimer)?;
