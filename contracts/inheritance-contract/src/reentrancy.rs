@@ -1,5 +1,5 @@
-use soroban_sdk::Env;
 use crate::{DataKey, InheritanceError};
+use soroban_sdk::Env;
 
 pub struct ReentrancyGuard<'a> {
     env: &'a Env,
@@ -10,13 +10,18 @@ impl<'a> ReentrancyGuard<'a> {
         if env.storage().temporary().has(&DataKey::ReentrancyGuard) {
             return Err(InheritanceError::ReentrantCall);
         }
-        env.storage().temporary().set(&DataKey::ReentrancyGuard, &true);
+        env.storage()
+            .temporary()
+            .set(&DataKey::ReentrancyGuard, &true);
         Ok(Self { env })
     }
 }
 
 impl<'a> Drop for ReentrancyGuard<'a> {
     fn drop(&mut self) {
-        self.env.storage().temporary().remove(&DataKey::ReentrancyGuard);
+        self.env
+            .storage()
+            .temporary()
+            .remove(&DataKey::ReentrancyGuard);
     }
 }

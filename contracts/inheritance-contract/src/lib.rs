@@ -8,8 +8,8 @@ use soroban_sdk::{
 mod disputes;
 use disputes::{DisputeRecord, DisputeStatus};
 
-mod yield_math;
 mod reentrancy;
+mod yield_math;
 
 /// Current contract version - bump this on each upgrade
 const CONTRACT_VERSION: u32 = 1;

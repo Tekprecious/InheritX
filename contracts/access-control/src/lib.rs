@@ -162,7 +162,10 @@ impl<'a> ReentrancyGuard<'a> {
 
 impl<'a> Drop for ReentrancyGuard<'a> {
     fn drop(&mut self) {
-        self.env.storage().temporary().remove(&SecurityKey::ReentrancyLock);
+        self.env
+            .storage()
+            .temporary()
+            .remove(&SecurityKey::ReentrancyLock);
     }
 }
 
