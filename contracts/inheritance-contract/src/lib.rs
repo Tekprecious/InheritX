@@ -8,7 +8,7 @@ use soroban_sdk::{
 mod disputes;
 use disputes::{DisputeRecord, DisputeStatus};
 
-mod reentrancy;
+
 mod yield_math;
 
 /// Current contract version - bump this on each upgrade
@@ -113,9 +113,6 @@ pub enum InheritanceError {
     AdminAlreadyInitialized = 21,
     NotAdmin = 22,
     KycNotSubmitted = 23,
-    KycAlreadyApproved = 24,
-    DuplicatePriority = 25,
-    PriorityOutOfRange = 26,
     PlanNotClaimed = 27,
     KycAlreadyRejected = 28,
     InsufficientBalance = 29,
@@ -141,6 +138,7 @@ pub enum InheritanceError {
     WillAlreadyFinalized = 49,
     WillVersionNotFound = 50,
     ReentrantCall = 51,
+    Blk = 52,
 }
 
 #[contracttype]
@@ -159,8 +157,6 @@ pub enum DataKey {
     Ky(Address),
     Ver,
     It(u64),            // per-plan inheritance trigger info
-    Ea(Address),        // bool, keyed by Address
-    Ela(Address),       // u64, keyed by Address
     Eac(u64),           // per-plan emergency access record
     Gd(u64),            // per-plan guardian configuration
     Eap(u64, Address),  // (plan_id, trusted_contact) -> Vec<Address>
@@ -199,7 +195,7 @@ pub enum DataKey {
     // Yield harvesting
     Yr,      // Vec<Address> of accounts allowed to trigger harvests
     Ys(u64), // plan_id -> PlanYieldState
-    ReentrancyGuard,
+    Rg,
 }
 
 #[contracttype]
@@ -1033,7 +1029,7 @@ impl InheritanceContract {
     }
 
     fn require_not_blacklisted(env: &Env, address: &Address) -> Result<(), InheritanceError> {
-        access_control::require_not_blacklisted(env, address, InheritanceError::AddressBlacklisted)
+        access_control::require_not_blacklisted(env, address, InheritanceError::Blk)
     }
 
     fn enter_guard(env: &Env) {
@@ -1500,11 +1496,11 @@ impl InheritanceContract {
                 .ok_or(InheritanceError::AllocationPercentageMismatch)?;
 
             if priority == 0 {
-                return Err(InheritanceError::PriorityOutOfRange);
+                return Err(InheritanceError::InvalidBeneficiaryData);
             }
 
             if priorities.contains(priority) {
-                return Err(InheritanceError::DuplicatePriority);
+                return Err(InheritanceError::InvalidBeneficiaryData);
             }
             priorities.push_back(priority);
         }
@@ -2529,7 +2525,7 @@ impl InheritanceContract {
         }
 
         if priority == 0 {
-            return Err(InheritanceError::PriorityOutOfRange);
+            return Err(InheritanceError::InvalidBeneficiaryData);
         }
 
         // Check for duplicate priorities
@@ -2537,7 +2533,7 @@ impl InheritanceContract {
             if i != beneficiary_index {
                 let b = plan.beneficiaries.get(i).unwrap();
                 if b.priority == priority {
-                    return Err(InheritanceError::DuplicatePriority);
+                    return Err(InheritanceError::InvalidBeneficiaryData);
                 }
             }
         }
@@ -2901,7 +2897,7 @@ impl InheritanceContract {
         });
 
         if status.approved {
-            return Err(InheritanceError::KycAlreadyApproved);
+            return Err(InheritanceError::AlreadyApproved);
         }
 
         status.submitted = true;
@@ -2928,7 +2924,7 @@ impl InheritanceContract {
         }
 
         if status.approved {
-            return Err(InheritanceError::KycAlreadyApproved);
+            return Err(InheritanceError::AlreadyApproved);
         }
 
         status.approved = true;
